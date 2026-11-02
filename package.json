@@ -1,0 +1,53 @@
+{
+  "name": "dsh-sticky-wall",
+  "version": "1.0.0",
+  "private": true,
+  "description": "便签墙 — 随时记录灵感。A sticky-note wall panel for DeepSeek Harness.",
+  "license": "MIT",
+  "author": "zanhoulll",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zanhoulll/dsh-sticky-wall.git"
+  },
+  "homepage": "https://github.com/zanhoulll/dsh-sticky-wall#readme",
+  "bugs": {
+    "url": "https://github.com/zanhoulll/dsh-sticky-wall/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "deepseek",
+    "cordis",
+    "dsh-plugin"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "test/smoke.mjs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  }
+}
