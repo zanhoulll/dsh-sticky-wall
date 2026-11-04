@@ -39,6 +39,24 @@ window.__ModuleLoader__.load({
       { key: 'cream', dot: '#D8C49B', card: '#F5ECDB', edge: '#EADFC9' },
     ];
 
+    // A note's ratio is how many columns it claims: 1 is a single cell, 2..4
+    // reach out to the right and take slots away from the rest of that row.
+    // The height is only a *floor* — text taller than that grows the card, and
+    // the masonry packer below gives the taller card room by pushing its
+    // neighbours down.
+    var RATIOS = [1, 2, 3, 4];
+    var GAP = 18;
+    var TARGET_COL = 236;
+    // Every note is one cell tall, so the shape comes from its width, not from
+    // shrinking the type.
+    var CARD_PAD = '20px 20px 14px';
+
+    // 1:1 .. 4:1 -> how many columns the note claims on the wall.
+    function ratioOf(note) {
+      var r = Math.round(Number(note && note.ratio));
+      return r >= 1 && r <= 4 ? r : 1;
+    }
+
     var zh = {
       nav: '便签墙',
       title: '便签墙',
@@ -57,6 +75,9 @@ window.__ModuleLoader__.load({
       editNote: '编辑',
       deleteNote: '删除',
       editHint: '双击编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消',
+      ratio: '比例',
+      ratioSpan: '占 {n} 格',
+      ratioCycle: '点击切换占位比例',
     };
 
     var en = {
@@ -77,6 +98,9 @@ window.__ModuleLoader__.load({
       editNote: 'Edit',
       deleteNote: 'Delete',
       editHint: 'Double-click to edit · ⌘/Ctrl + Enter to save · Esc to cancel',
+      ratio: 'Ratio',
+      ratioSpan: 'spans {n} columns',
+      ratioCycle: 'Click to cycle how many columns it spans',
     };
 
     function fallbackText(key) {
@@ -210,6 +234,16 @@ window.__ModuleLoader__.load({
       '.dsw-sticky-add:active:not(:disabled){transform:translateY(1px)}',
       '.dsw-sticky-add:disabled{opacity:0.45;cursor:not-allowed}',
       '.dsw-sticky-search input::-webkit-search-cancel-button{display:none}',
+      '.dsw-sticky-wall{position:relative;transition:height .24s cubic-bezier(.22,.8,.24,1)}',
+      // No width transition: the packer measures card heights right after
+      // commit, and a mid-flight width would be measured instead of the final
+      // one, leaving overlaps behind.
+      '.dsw-sticky-slot{position:absolute;top:0;left:0;will-change:transform}',
+      // Positions only animate once the first packing has landed, otherwise the
+      // whole wall would fly in from the top-left corner on mount.
+      '.dsw-sticky-ready .dsw-sticky-slot{transition:transform .26s cubic-bezier(.22,.8,.24,1)}',
+      '.dsw-sticky-slot:hover{z-index:3}',
+      '.dsw-sticky-ratiochip{font-variant-numeric:tabular-nums}',
       '@keyframes dswStickyIn{from{opacity:0}to{opacity:1}}',
     ].join('\n');
 
@@ -266,6 +300,9 @@ window.__ModuleLoader__.load({
     };
     var CARD_TIME = { fontSize: '12px', color: 'rgba(59,54,43,0.62)' };
     var CARD_ACTIONS = { display: 'flex', alignItems: 'center', gap: '6px' };
+    // Metrics deliberately mirror CARD_TEXT (same font, line height, padding and
+    // bottom margin) so switching a note into edit mode does not shift a single
+    // pixel of the text.
     var EDIT_TA = {
       width: '100%',
       flex: '1 1 auto',
@@ -278,7 +315,12 @@ window.__ModuleLoader__.load({
       fontSize: '17px',
       lineHeight: '1.55',
       fontFamily: 'inherit',
-      marginBottom: '10px',
+      padding: 0,
+      marginBottom: '14px',
+      boxSizing: 'border-box',
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+      overflowY: 'hidden',
     };
     var EMPTY = { padding: '64px 0', textAlign: 'center' };
 
@@ -301,6 +343,10 @@ window.__ModuleLoader__.load({
       var color = colorState[0];
       var setColor = colorState[1];
 
+      var ratioState = useState(1);
+      var ratio = ratioState[0];
+      var setRatio = ratioState[1];
+
       var queryState = useState('');
       var query = queryState[0];
       var setQuery = queryState[1];
@@ -316,7 +362,42 @@ window.__ModuleLoader__.load({
       var tickState = useState(0);
       var setTick = tickState[1];
 
+      // Masonry state: every card is absolutely placed inside .dsw-sticky-wall,
+      // so the wall needs the packed positions and the packed height.
+      // cols starts at a guess and is corrected by the packer before paint.
+      var layoutState = useState({ width: TARGET_COL, colW: TARGET_COL, cols: 4, height: 0, pos: {} });
+      var layout = layoutState[0];
+      var setLayout = layoutState[1];
+
+      var colState = useState(TARGET_COL);
+      var colW = colState[0];
+      var setColW = colState[1];
+
       var taRef = useRef(null);
+      var editRef = useRef(null);
+      var editSize = useRef(null);
+      var wallRef = useRef(null);
+      var cardRefs = useRef({});
+
+      // Layout measurement must settle before the browser paints, otherwise the
+      // wall would flash its unpositioned stack.
+      var useLayoutEffect = React.useLayoutEffect || React.useEffect || function () {};
+
+      // The stored note may be older than the ratio feature — or written by a
+      // host process that still predates it, in which case the field is stripped
+      // on every save. The local mirror is written by this browser and does keep
+      // it, so recover a missing ratio from there before falling back to square.
+      function hydrate(list) {
+        var byId = {};
+        readLocal().forEach(function (n) {
+          if (n && n.id) byId[n.id] = n;
+        });
+        return list.map(function (n) {
+          var mine = byId[n.id];
+          var r = n.ratio != null ? ratioOf(n) : mine ? ratioOf(mine) : 1;
+          return Object.assign({}, n, { ratio: r });
+        });
+      }
 
       // Load once from the host route; fall back to the local mirror.
       useEffect(function () {
@@ -326,7 +407,14 @@ window.__ModuleLoader__.load({
             return r.json();
           })
           .then(function (data) {
-            var list = data && Array.isArray(data.notes) ? data.notes : [];
+            var list =
+              data && Array.isArray(data.notes)
+                ? hydrate(
+                    data.notes.filter(function (n) {
+                      return n && typeof n === 'object';
+                    }),
+                  )
+                : [];
             setNotes(list);
             try {
               window.localStorage.setItem(LS_KEY, JSON.stringify(list));
@@ -361,7 +449,7 @@ window.__ModuleLoader__.load({
         var text = draft.trim();
         if (!text) return;
         var now = Date.now();
-        var note = { id: newId(), text: text, color: color, createdAt: now, updatedAt: now };
+        var note = { id: newId(), text: text, color: color, ratio: ratio, createdAt: now, updatedAt: now };
         var next = [note].concat(notes);
         setNotes(next);
         setDraft('');
@@ -395,7 +483,7 @@ window.__ModuleLoader__.load({
         var now = Date.now();
         var next = notes.map(function (n) {
           return n.id === id
-            ? { id: n.id, text: text, color: n.color, createdAt: n.createdAt, updatedAt: now }
+            ? { id: n.id, text: text, color: n.color, ratio: ratioOf(n), createdAt: n.createdAt, updatedAt: now }
             : n;
         });
         setNotes(next);
@@ -405,6 +493,24 @@ window.__ModuleLoader__.load({
 
       function cancelEdit() {
         setEditingId(null);
+      }
+
+      // Re-shape a note without touching updatedAt: the wall sorts by edit
+      // time, and changing a note's proportions is not an edit of its content.
+      function cycleRatio(id) {
+        var next = notes.map(function (n) {
+          if (n.id !== id) return n;
+          return {
+            id: n.id,
+            text: n.text,
+            color: n.color,
+            ratio: (ratioOf(n) % RATIOS.length) + 1,
+            createdAt: n.createdAt,
+            updatedAt: n.updatedAt,
+          };
+        });
+        setNotes(next);
+        persist(next);
       }
 
       function onComposerKeyDown(e) {
@@ -440,6 +546,179 @@ window.__ModuleLoader__.load({
         [notes, query],
       );
 
+      // --- Waterfall packing -------------------------------------------------
+      // A note's ratio is how many columns it claims: 1:1 takes one cell,
+      // 2:1 takes two, 4:1 takes four. The packer drops each card into the
+      // topmost place where its span fits, so a wider card takes the room from
+      // its neighbours ("that row ends up with one column fewer"), and a card
+      // that outgrows its nominal height pushes the rest of its span down.
+
+      function measureLayout() {
+        var wall = wallRef.current;
+        if (!wall) return null;
+        var total = Math.round(wall.clientWidth || 0);
+        if (!(total > 0)) return null;
+        var cols = Math.max(1, Math.floor((total + GAP) / (TARGET_COL + GAP)));
+        var colW = Math.floor((total - GAP * (cols - 1)) / cols);
+        if (!(colW > 0)) return null;
+        // Per column, the occupied bands as [top, bottom) pairs with the gap
+        // already baked into `bottom`. Tracking bands instead of a single
+        // column height is what lets a later card drop into a hole left by a
+        // wide card that skipped over a short column.
+        var occ = [];
+        var i, j, k, t;
+        for (i = 0; i < cols; i++) occ.push([]);
+        var pos = {};
+        for (i = 0; i < filtered.length; i++) {
+          var note = filtered[i];
+          var span = Math.min(ratioOf(note), cols);
+          var width = span * colW + (span - 1) * GAP;
+          var node = cardRefs.current[note.id];
+          // Before a card can be measured (first paint), estimate one cell of
+          // height so the wall never stacks everything at the origin.
+          var h = (node ? node.offsetHeight : Math.round(width / span) + 24) + GAP;
+          var best = null;
+          for (k = 0; k + span <= cols; k++) {
+            // A band can only start at the top of the wall or at the bottom of
+            // a band it has to clear, so those are the only y worth testing.
+            var cands = [0];
+            for (j = k; j < k + span; j++) {
+              for (t = 0; t < occ[j].length; t++) cands.push(occ[j][t][1]);
+            }
+            cands.sort(function (p, q) {
+              return p - q;
+            });
+            for (t = 0; t < cands.length; t++) {
+              var y = cands[t];
+              if (t > 0 && y === cands[t - 1]) continue;
+              var fits = true;
+              for (j = k; j < k + span && fits; j++) {
+                var bands = occ[j];
+                for (var b = 0; b < bands.length; b++) {
+                  if (y < bands[b][1] - 0.5 && bands[b][0] < y + h - 0.5) {
+                    fits = false;
+                    break;
+                  }
+                }
+              }
+              if (fits) {
+                if (!best || y < best.y - 0.5) best = { k: k, y: y };
+                break;
+              }
+            }
+          }
+          if (!best) {
+            // Only reachable if every column were full, i.e. never in practice.
+            var drop = 0;
+            for (j = 0; j < cols; j++) {
+              var last = occ[j][occ[j].length - 1];
+              if (last && last[1] > drop) drop = last[1];
+            }
+            best = { k: 0, y: drop };
+          }
+          pos[note.id] = {
+            x: Math.round(best.k * (colW + GAP)),
+            y: Math.round(best.y),
+            w: width,
+            span: span,
+          };
+          for (j = best.k; j < best.k + span; j++) {
+            var band = occ[j];
+            band.push([best.y, best.y + h]);
+            band.sort(function (p, q) {
+              return p[0] - q[0];
+            });
+          }
+        }
+        var bottom = 0;
+        for (var m = 0; m < cols; m++) {
+          var tail = occ[m][occ[m].length - 1];
+          if (tail) bottom = Math.max(bottom, tail[1] - GAP);
+        }
+        return {
+          width: colW,
+          colW: colW,
+          cols: cols,
+          height: Math.max(0, Math.round(bottom)),
+          pos: pos,
+        };
+      }
+
+      function sameLayout(a, b) {
+        if (!a || !b) return false;
+        if (Math.abs((a.height || 0) - (b.height || 0)) > 0.5) return false;
+        if (Math.abs((a.width || 0) - (b.width || 0)) > 0.5) return false;
+        if ((a.cols || 0) !== (b.cols || 0)) return false;
+        var keys = Object.keys(a.pos || {});
+        if (keys.length !== Object.keys(b.pos || {}).length) return false;
+        for (var i = 0; i < keys.length; i++) {
+          var pa = a.pos[keys[i]];
+          var pb = b.pos[keys[i]];
+          if (!pb || Math.abs(pa.x - pb.x) > 0.5 || Math.abs(pa.y - pb.y) > 0.5) return false;
+        }
+        return true;
+      }
+
+      // A textarea never grows with its content, so a long note would snap back
+      // to its nominal cell height the moment it entered edit mode, and then
+      // jump again when the edit was committed. Size the editor to its text
+      // before the packer measures the wall, and re-pack in the same frame when
+      // its height changed (the wall was packed with the pre-resize height).
+      useLayoutEffect(function () {
+        var el = editRef.current;
+        if (!el) {
+          editSize.current = null;
+          return;
+        }
+        el.style.height = 'auto';
+        var want = Math.max(0, el.scrollHeight);
+        el.style.height = want + 'px';
+        var prev = editSize.current;
+        if (!prev || prev.id !== editingId || Math.abs(prev.h - want) > 0.5) {
+          editSize.current = { id: editingId, h: want };
+          setTick(function (x) {
+            return x + 1;
+          });
+        }
+      });
+
+      // Runs after every commit; it only writes state when the packing actually
+      // changed, so the extra pass a width change causes settles in one go.
+      useLayoutEffect(function () {
+        if (!filtered.length) {
+          if (layout.height !== 0 || Object.keys(layout.pos).length) {
+            setLayout({
+              width: layout.width,
+              colW: layout.colW,
+              cols: layout.cols,
+              height: 0,
+              pos: {},
+            });
+          }
+          return;
+        }
+        var next = measureLayout();
+        if (!next) return;
+        if (next.width !== colW) setColW(next.width);
+        if (!sameLayout(layout, next)) setLayout(next);
+      });
+
+      // A sidebar collapse or a window resize changes the wall width without a
+      // React update, so keep an observer on it.
+      useEffect(function () {
+        var wall = wallRef.current;
+        if (!wall || typeof window.ResizeObserver !== 'function') return undefined;
+        var ro = new window.ResizeObserver(function () {
+          setTick(function (x) {
+            return x + 1;
+          });
+        });
+        ro.observe(wall);
+        return function () {
+          ro.disconnect();
+        };
+      }, [notes.length]);
+
       function dotEl(idx) {
         var c = PALETTE[idx];
         var active = idx === color;
@@ -467,6 +746,43 @@ window.__ModuleLoader__.load({
         });
       }
 
+      function spanLabel(n) {
+        return t('ratioSpan').replace('{n}', String(n));
+      }
+
+      // Composer shape picker: the ratio the next note is born with.
+      function ratioChip(r) {
+        var active = r === ratio;
+        return h(
+          'button',
+          {
+            key: 'ratio_' + r,
+            type: 'button',
+            className: 'dsw-sticky-ratiochip',
+            title: t('ratio') + ' ' + r + ':1 · ' + spanLabel(r),
+            'aria-pressed': active,
+            onClick: function () {
+              setRatio(r);
+            },
+            style: {
+              height: '26px',
+              padding: '0 9px',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              fontSize: '11.5px',
+              fontWeight: 700,
+              letterSpacing: '0.2px',
+              background: active ? '#3D362A' : 'rgba(255,255,255,0.5)',
+              color: active ? '#FBF3DC' : '#7A6A3C',
+              border: '1px solid ' + (active ? '#3D362A' : 'rgba(97,84,50,0.28)'),
+              transition: 'background .15s ease, color .15s ease, border-color .15s ease',
+            },
+          },
+          r + ':1',
+        );
+      }
+
       function renderCard(note) {
         var c = PALETTE[(note.color | 0) % PALETTE.length] || PALETTE[0];
         var isEditing = editingId === note.id;
@@ -474,13 +790,21 @@ window.__ModuleLoader__.load({
         var seed = 0;
         for (var i = 0; i < s.length; i++) seed = (seed + s.charCodeAt(i)) % 1000;
         var rot = ((seed % 5) - 2) * 0.5;
+        var place = layout.pos[note.id];
+        // Span: how many columns this note claims. Capped by the wall width so a
+        // 4:1 note still fits a narrow panel.
+        var cols = Math.max(1, layout.cols || 1);
+        var span = Math.min(ratioOf(note), cols);
+        var r = span;
+        var slotW = span * colW + (span - 1) * GAP;
         var cardStyle = {
-          position: 'relative',
           display: 'flex',
           flexDirection: 'column',
           justifyContent: 'space-between',
-          minHeight: '164px',
-          padding: '20px 20px 14px',
+          // The shape is a floor, not a clamp: long text makes the card taller
+          // than one cell and the packer pushes the rest of its span down.
+          aspectRatio: String(span),
+          padding: CARD_PAD,
           borderRadius: '16px',
           background: c.card,
           border: '1px solid ' + c.edge,
@@ -492,6 +816,7 @@ window.__ModuleLoader__.load({
           ? h('textarea', {
               key: 'edit',
               className: 'dsw-sticky-edit',
+              ref: editRef,
               style: EDIT_TA,
               value: editingText,
               autoFocus: true,
@@ -514,45 +839,85 @@ window.__ModuleLoader__.load({
               note.text,
             );
         return h(
-          'article',
-          { key: note.id, className: 'dsw-sticky-card', style: cardStyle },
-          textEl,
+          'div',
+          {
+            key: note.id,
+            className: 'dsw-sticky-slot',
+            style: {
+              width: slotW + 'px',
+              transform:
+                'translate3d(' + (place ? place.x : 0) + 'px,' + (place ? place.y : 0) + 'px,0)',
+            },
+          },
           h(
-            'div',
-            { key: 'foot', style: CARD_FOOT },
-            h('span', { key: 'time', style: CARD_TIME }, relTime(note.updatedAt || note.createdAt, t)),
+            'article',
+            {
+              key: 'card',
+              className: 'dsw-sticky-card',
+              'data-ratio': r,
+              style: cardStyle,
+              ref: function (el) {
+                if (el) cardRefs.current[note.id] = el;
+                else delete cardRefs.current[note.id];
+              },
+            },
+            textEl,
             h(
               'div',
-              { key: 'actions', className: 'dsw-sticky-actions', style: CARD_ACTIONS },
+              { key: 'foot', style: CARD_FOOT },
               h(
-                'button',
-                {
-                  key: 'edit',
-                  type: 'button',
-                  className: 'dsw-sticky-iconbtn',
-                  title: t('editNote'),
-                  'aria-label': t('editNote'),
-                  style: {},
-                  onClick: function () {
-                    beginEdit(note);
-                  },
-                },
-                pencilIcon(),
+                'span',
+                { key: 'time', style: CARD_TIME },
+                relTime(note.updatedAt || note.createdAt, t),
               ),
               h(
-                'button',
-                {
-                  key: 'del',
-                  type: 'button',
-                  className: 'dsw-sticky-iconbtn',
-                  title: t('deleteNote'),
-                  'aria-label': t('deleteNote'),
-                  style: {},
-                  onClick: function () {
-                    removeNote(note.id);
+                'div',
+                { key: 'actions', className: 'dsw-sticky-actions', style: CARD_ACTIONS },
+                h(
+                  'button',
+                  {
+                    key: 'ratio',
+                    type: 'button',
+                    className: 'dsw-sticky-iconbtn dsw-sticky-ratiochip',
+                    title: t('ratioCycle') + ' · ' + r + ':1 · ' + spanLabel(r),
+                    'aria-label': t('ratio') + ' ' + r + ':1 · ' + spanLabel(r),
+                    style: { width: 'auto', padding: '0 7px', fontSize: '11px', fontWeight: 700 },
+                    onClick: function () {
+                      cycleRatio(note.id);
+                    },
                   },
-                },
-                trashIcon(),
+                  r + ':1',
+                ),
+                h(
+                  'button',
+                  {
+                    key: 'edit',
+                    type: 'button',
+                    className: 'dsw-sticky-iconbtn',
+                    title: t('editNote'),
+                    'aria-label': t('editNote'),
+                    style: {},
+                    onClick: function () {
+                      beginEdit(note);
+                    },
+                  },
+                  pencilIcon(),
+                ),
+                h(
+                  'button',
+                  {
+                    key: 'del',
+                    type: 'button',
+                    className: 'dsw-sticky-iconbtn',
+                    title: t('deleteNote'),
+                    'aria-label': t('deleteNote'),
+                    style: {},
+                    onClick: function () {
+                      removeNote(note.id);
+                    },
+                  },
+                  trashIcon(),
+                ),
               ),
             ),
           ),
@@ -712,10 +1077,23 @@ window.__ModuleLoader__.load({
           },
           h(
             'div',
-            { style: { display: 'flex', alignItems: 'center', gap: '9px' } },
-            PALETTE.map(function (_, i) {
-              return dotEl(i);
+            { style: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' } },
+            h(
+              'div',
+              { style: { display: 'flex', alignItems: 'center', gap: '9px' } },
+              PALETTE.map(function (_, i) {
+                return dotEl(i);
+              }),
+            ),
+            h('span', {
+              key: 'sep',
+              style: { width: '1px', height: '18px', background: 'rgba(97,84,50,0.22)' },
             }),
+            h(
+              'div',
+              { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+              RATIOS.map(ratioChip),
+            ),
           ),
           h(
             'div',
@@ -765,12 +1143,10 @@ window.__ModuleLoader__.load({
         grid = h(
           'div',
           {
-            style: {
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(232px, 1fr))',
-              gap: '18px',
-              alignItems: 'start',
-            },
+            key: 'wall',
+            ref: wallRef,
+            className: layout.height > 0 ? 'dsw-sticky-wall dsw-sticky-ready' : 'dsw-sticky-wall',
+            style: { height: (layout.height || 0) + 'px' },
           },
           filtered.map(renderCard),
         );

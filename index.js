@@ -23,6 +23,7 @@ const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_NOTES = 2000;
 const MAX_TEXT = 20000;
 const MAX_COLOR = 11;
+const MAX_RATIO = 4;
 
 /** Clamp whatever the browser sent into a well-formed note, or drop it. */
 function normalizeNote(raw) {
@@ -34,9 +35,12 @@ function normalizeNote(raw) {
       ? raw.id.slice(0, 120)
       : `n_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
   const color = Number.isInteger(raw.color) ? Math.max(0, Math.min(MAX_COLOR, raw.color)) : 0;
+  // How many columns of the wall the note spans: 1 is one cell, 4 fills a row.
+  // The browser clamps it again to the column count it actually has.
+  const ratio = Number.isInteger(raw.ratio) ? Math.max(1, Math.min(MAX_RATIO, raw.ratio)) : 1;
   const createdAt = Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now();
   const updatedAt = Number.isFinite(raw.updatedAt) ? raw.updatedAt : createdAt;
-  return { id, text, color, createdAt, updatedAt };
+  return { id, text, color, ratio, createdAt, updatedAt };
 }
 
 function readNotes() {
