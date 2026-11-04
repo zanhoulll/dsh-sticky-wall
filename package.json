@@ -1,6 +1,6 @@
 {
   "name": "dsh-sticky-wall",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "便签墙 — 随时记录灵感。A sticky-note wall panel for DeepSeek Harness.",
   "license": "MIT",
@@ -38,6 +38,7 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
+    "CHANGELOG.md",
     "test/smoke.mjs"
   ],
   "dsh": {
