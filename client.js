@@ -47,8 +47,9 @@ window.__ModuleLoader__.load({
     var RATIOS = [1, 2, 3, 4];
     var GAP = 18;
     var TARGET_COL = 236;
-    // Every note is one cell tall, so the shape comes from its width, not from
-    // shrinking the type.
+    // A card's minimum height shrinks with its span (column width / span): 1:1
+    // stays square, wider notes get flatter. The shape comes from width and
+    // span, not from shrinking the type.
     var CARD_PAD = '20px 20px 14px';
 
     // 1:1 .. 4:1 -> how many columns the note claims on the wall.
@@ -74,6 +75,8 @@ window.__ModuleLoader__.load({
       daysAgo: '{n} 天前',
       editNote: '编辑',
       deleteNote: '删除',
+      copyNote: '复制',
+      copied: '已复制',
       editHint: '双击编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消',
       ratio: '比例',
       ratioSpan: '占 {n} 格',
@@ -97,6 +100,8 @@ window.__ModuleLoader__.load({
       daysAgo: '{n} d ago',
       editNote: 'Edit',
       deleteNote: 'Delete',
+      copyNote: 'Copy',
+      copied: 'Copied',
       editHint: 'Double-click to edit · ⌘/Ctrl + Enter to save · Esc to cancel',
       ratio: 'Ratio',
       ratioSpan: 'spans {n} columns',
@@ -177,6 +182,42 @@ window.__ModuleLoader__.load({
           d: 'M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13',
           stroke: 'currentColor',
           strokeWidth: 1.7,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      );
+    }
+
+    function copyIcon() {
+      return h(
+        'svg',
+        { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true' },
+        h('rect', {
+          x: 8,
+          y: 8,
+          width: 11,
+          height: 11,
+          rx: 2.4,
+          stroke: 'currentColor',
+          strokeWidth: 1.7,
+        }),
+        h('path', {
+          d: 'M6 15.5A2.5 2.5 0 0 1 4 13V6.5A2.5 2.5 0 0 1 6.5 4H13a2.5 2.5 0 0 1 2.5 2.5',
+          stroke: 'currentColor',
+          strokeWidth: 1.7,
+          strokeLinecap: 'round',
+        }),
+      );
+    }
+
+    function checkIcon() {
+      return h(
+        'svg',
+        { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true' },
+        h('path', {
+          d: 'M5 12.5l4.5 4.5L19 6.5',
+          stroke: 'currentColor',
+          strokeWidth: 1.9,
           strokeLinecap: 'round',
           strokeLinejoin: 'round',
         }),
@@ -362,6 +403,12 @@ window.__ModuleLoader__.load({
       var tickState = useState(0);
       var setTick = tickState[1];
 
+      // id of the note whose text was just copied, so its button can show a
+      // tick for a moment instead of the copy glyph.
+      var copiedState = useState(null);
+      var copiedId = copiedState[0];
+      var setCopiedId = copiedState[1];
+
       // Masonry state: every card is absolutely placed inside .dsw-sticky-wall,
       // so the wall needs the packed positions and the packed height.
       // cols starts at a guess and is corrected by the packer before paint.
@@ -378,6 +425,8 @@ window.__ModuleLoader__.load({
       var editSize = useRef(null);
       var wallRef = useRef(null);
       var cardRefs = useRef({});
+      // Natural card heights cached per note (keyed by width/span/text) so the
+      // row-alignment stretch never feeds back into the measurement.
 
       // Layout measurement must settle before the browser paints, otherwise the
       // wall would flash its unpositioned stack.
@@ -467,6 +516,49 @@ window.__ModuleLoader__.load({
         if (editingId === id) setEditingId(null);
       }
 
+      // Copy a note's text to the clipboard, then briefly show a tick on its
+      // copy button. Falls back to execCommand when the async clipboard API is
+      // unavailable (older browsers / non-secure contexts).
+      function copyNote(note) {
+        var text = String((note && note.text) || '');
+        var finish = function () {
+          setCopiedId(note.id);
+          window.setTimeout(function () {
+            setCopiedId(function (cur) {
+              return cur === note.id ? null : cur;
+            });
+          }, 1200);
+        };
+        var fallback = function () {
+          try {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.top = '-9999px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            finish();
+          } catch (e) {}
+        };
+        try {
+          if (
+            window.navigator &&
+            window.navigator.clipboard &&
+            typeof window.navigator.clipboard.writeText === 'function'
+          ) {
+            window.navigator.clipboard.writeText(text).then(finish, fallback);
+          } else {
+            fallback();
+          }
+        } catch (e) {
+          fallback();
+        }
+      }
+
       function beginEdit(note) {
         setEditingId(note.id);
         setEditingText(note.text || '');
@@ -553,6 +645,14 @@ window.__ModuleLoader__.load({
       // its neighbours ("that row ends up with one column fewer"), and a card
       // that outgrows its nominal height pushes the rest of its span down.
 
+      // A card's rendered height is its natural height: renderCard only sets
+      // the nominal square/flat min-height and never a row-aligned stretch, so
+      // offsetHeight is exactly what the note occupies. Row alignment below
+      // reserves blank wall space around it without changing this value.
+      function measureNatural(note, node, slotW, nominal) {
+        return node && node.offsetHeight > 0 ? node.offsetHeight : nominal;
+      }
+
       function measureLayout() {
         var wall = wallRef.current;
         if (!wall) return null;
@@ -561,28 +661,89 @@ window.__ModuleLoader__.load({
         var cols = Math.max(1, Math.floor((total + GAP) / (TARGET_COL + GAP)));
         var colW = Math.floor((total - GAP * (cols - 1)) / cols);
         if (!(colW > 0)) return null;
-        // Per column, the occupied bands as [top, bottom) pairs with the gap
-        // already baked into `bottom`. Tracking bands instead of a single
-        // column height is what lets a later card drop into a hole left by a
-        // wide card that skipped over a short column.
-        var occ = [];
-        var i, j, k, t;
-        for (i = 0; i < cols; i++) occ.push([]);
-        var pos = {};
+
+        // Pass 1 — measure each card's natural height and remember its slot.
+        var meta = {};
+        var nat = {};
+        var i;
         for (i = 0; i < filtered.length; i++) {
           var note = filtered[i];
           var span = Math.min(ratioOf(note), cols);
           var width = span * colW + (span - 1) * GAP;
+          var nominal = Math.round(colW / span);
           var node = cardRefs.current[note.id];
-          // Before a card can be measured (first paint), estimate one cell of
-          // height so the wall never stacks everything at the origin.
-          var h = (node ? node.offsetHeight : Math.round(width / span) + 24) + GAP;
+          var natH = measureNatural(note, node, width, nominal);
+          if (!(natH > 0)) natH = nominal;
+          meta[note.id] = { span: span, width: width, nominal: nominal };
+          nat[note.id] = natH;
+        }
+
+        // Pass 2 — row alignment. Group cards into shelves (left to right, by
+        // span). When a shelf is all one shape and its cards differ by less
+        // than half a normal card height, reserve the tallest height for every
+        // card in the shelf. The extra room below the shorter cards is plain
+        // wall background — the cards keep their natural height — so the next
+        // shelf starts flush on the left instead of being staggered.
+        var target = {};
+        for (i = 0; i < filtered.length; i++) target[filtered[i].id] = nat[filtered[i].id];
+        var rows = [];
+        var curRow = [];
+        var usedCols = 0;
+        for (i = 0; i < filtered.length; i++) {
+          var rid = filtered[i].id;
+          var rspan = meta[rid].span;
+          if (curRow.length && usedCols + rspan > cols) {
+            rows.push(curRow);
+            curRow = [];
+            usedCols = 0;
+          }
+          curRow.push(rid);
+          usedCols += rspan;
+        }
+        if (curRow.length) rows.push(curRow);
+
+        rows.forEach(function (row) {
+          if (row.length < 2) return;
+          var span0 = meta[row[0]].span;
+          var mx = 0;
+          var mn = Infinity;
+          var same = true;
+          for (var a = 0; a < row.length; a++) {
+            var mm = meta[row[a]];
+            if (mm.span !== span0) {
+              same = false;
+              break;
+            }
+            var hv = nat[row[a]];
+            if (hv > mx) mx = hv;
+            if (hv < mn) mn = hv;
+          }
+          if (!same) return;
+          var normal = colW / span0;
+          // Align only when the tallest card overflows its nominal height by
+          // less than half a card — i.e. the intrusion that makes the next
+          // shelf skip a column is a small one.
+          if (mx > mn + 0.5 && mx - normal < normal / 2 - 0.5) {
+            for (var b2 = 0; b2 < row.length; b2++) target[row[b2]] = mx;
+          }
+        });
+
+        // Pass 3 — waterfall packing with the (possibly aligned) heights. Bands
+        // are tracked per column so a later card can still drop into a hole left
+        // by a wide card that skipped over a short column.
+        var occ = [];
+        var j, k, t;
+        for (j = 0; j < cols; j++) occ.push([]);
+        var pos = {};
+        for (i = 0; i < filtered.length; i++) {
+          var cn = filtered[i];
+          var cm = meta[cn.id];
+          var cspan = cm.span;
+          var ch = (target[cn.id] > 0 ? target[cn.id] : cm.nominal) + GAP;
           var best = null;
-          for (k = 0; k + span <= cols; k++) {
-            // A band can only start at the top of the wall or at the bottom of
-            // a band it has to clear, so those are the only y worth testing.
+          for (k = 0; k + cspan <= cols; k++) {
             var cands = [0];
-            for (j = k; j < k + span; j++) {
+            for (j = k; j < k + cspan; j++) {
               for (t = 0; t < occ[j].length; t++) cands.push(occ[j][t][1]);
             }
             cands.sort(function (p, q) {
@@ -592,10 +753,10 @@ window.__ModuleLoader__.load({
               var y = cands[t];
               if (t > 0 && y === cands[t - 1]) continue;
               var fits = true;
-              for (j = k; j < k + span && fits; j++) {
+              for (j = k; j < k + cspan && fits; j++) {
                 var bands = occ[j];
                 for (var b = 0; b < bands.length; b++) {
-                  if (y < bands[b][1] - 0.5 && bands[b][0] < y + h - 0.5) {
+                  if (y < bands[b][1] - 0.5 && bands[b][0] < y + ch - 0.5) {
                     fits = false;
                     break;
                   }
@@ -616,15 +777,16 @@ window.__ModuleLoader__.load({
             }
             best = { k: 0, y: drop };
           }
-          pos[note.id] = {
+          pos[cn.id] = {
             x: Math.round(best.k * (colW + GAP)),
             y: Math.round(best.y),
-            w: width,
-            span: span,
+            w: cm.width,
+            span: cspan,
+            h: target[cn.id] > 0 ? target[cn.id] : cm.nominal,
           };
-          for (j = best.k; j < best.k + span; j++) {
+          for (j = best.k; j < best.k + cspan; j++) {
             var band = occ[j];
-            band.push([best.y, best.y + h]);
+            band.push([best.y, best.y + ch]);
             band.sort(function (p, q) {
               return p[0] - q[0];
             });
@@ -655,6 +817,7 @@ window.__ModuleLoader__.load({
           var pa = a.pos[keys[i]];
           var pb = b.pos[keys[i]];
           if (!pb || Math.abs(pa.x - pb.x) > 0.5 || Math.abs(pa.y - pb.y) > 0.5) return false;
+          if (Math.abs((pa.h || 0) - (pb.h || 0)) > 0.5) return false;
         }
         return true;
       }
@@ -801,9 +964,13 @@ window.__ModuleLoader__.load({
           display: 'flex',
           flexDirection: 'column',
           justifyContent: 'space-between',
-          // The shape is a floor, not a clamp: long text makes the card taller
-          // than one cell and the packer pushes the rest of its span down.
-          aspectRatio: String(span),
+          // Minimum height, not a clamp: 1:1 stays one cell tall (square) while
+          // 2:1/3:1/4:1 get flatter as the span grows (column width / span).
+          // Long text still grows the card past this floor and the packer
+          // pushes the rest of its span down.
+          // Row alignment never resizes the card itself — the packer only
+          // reserves blank wall space below shorter cards in a shelf.
+          minHeight: Math.round(colW / span) + 'px',
           padding: CARD_PAD,
           borderRadius: '16px',
           background: c.card,
@@ -887,6 +1054,21 @@ window.__ModuleLoader__.load({
                     },
                   },
                   r + ':1',
+                ),
+                h(
+                  'button',
+                  {
+                    key: 'copy',
+                    type: 'button',
+                    className: 'dsw-sticky-iconbtn',
+                    title: copiedId === note.id ? t('copied') : t('copyNote'),
+                    'aria-label': t('copyNote'),
+                    style: {},
+                    onClick: function () {
+                      copyNote(note);
+                    },
+                  },
+                  copiedId === note.id ? checkIcon() : copyIcon(),
                 ),
                 h(
                   'button',

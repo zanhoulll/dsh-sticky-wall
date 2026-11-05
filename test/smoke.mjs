@@ -3,8 +3,9 @@
  *
  * Runs the browser half (client.js) in Node with a tiny React shim and a fake
  * cordis ctx, then calls the registered components directly to assert that the
- * sidebar icon, the empty panel, the waterfall wall, the ratio controls and the
- * edit state all render without throwing. No real DOM or browser needed.
+ * sidebar icon, the empty panel, the waterfall wall (with per-span minimum
+ * heights), the ratio controls, the copy button and the edit state all render
+ * without throwing. No real DOM or browser needed.
  *
  *   node test/smoke.mjs
  */
@@ -198,12 +199,16 @@ try {
   if (slots.length !== notes.length) throw new Error('expected ' + notes.length + ' slots, got ' + slots.length);
   if (!slots.every((s) => /^\d+px$/.test(s.props.style.width))) throw new Error('slot width not pinned');
   const articles = nodes.filter((n) => n.type === 'article');
-  const ratios = articles.map((a) => a.props.style.aspectRatio);
-  const expected = ['1', '2', '3', '4', '1'];
-  if (ratios.join(',') !== expected.join(',')) {
-    throw new Error('aspect ratios ' + ratios.join(',') + ' != ' + expected.join(','));
+  // Minimum height = column width / span, so 1:1 stays square and 2:1/3:1/4:1
+  // get flatter instead of every card being one cell tall. The fixture wall is
+  // four columns of 236px, so the floors are 236 / 118 / 79 / 59 / (missing
+  // ratio -> 1) 236.
+  const mins = articles.map((a) => a.props.style.minHeight);
+  const expected = ['236px', '118px', '79px', '59px', '236px'];
+  if (mins.join(',') !== expected.join(',')) {
+    throw new Error('min heights ' + mins.join(',') + ' != ' + expected.join(','));
   }
-  console.log('PASS waterfall slots + ratios, slots=', slots.length, 'ratios=', ratios.join(','));
+  console.log('PASS waterfall slots + min heights, slots=', slots.length, 'mins=', mins.join(','));
 } catch (e) {
   failures++;
   console.log('FAIL waterfall slots:', e.message);
@@ -265,6 +270,25 @@ try {
 } catch (e) {
   failures++;
   console.log('FAIL ratio recovery:', e.message);
+}
+
+// 8) Every card exposes a copy button that copies the note's text.
+try {
+  const now = Date.now();
+  const notes = [{ id: 'n_abc', text: '复制我', color: 0, ratio: 1, createdAt: now, updatedAt: now }];
+  const cap = boot([notes]);
+  const nodes = collect(cap.main.comp({}).type({ t: (k) => 'T:' + k }));
+  const copyBtn = nodes.find(
+    (n) =>
+      n.type === 'button' &&
+      (n.props.title === 'T:copyNote' || n.props['aria-label'] === 'T:copyNote'),
+  );
+  if (!copyBtn) throw new Error('no copy button in card actions');
+  if (typeof copyBtn.props.onClick !== 'function') throw new Error('copy button has no onClick handler');
+  console.log('PASS copy button present');
+} catch (e) {
+  failures++;
+  console.log('FAIL copy button:', e.message);
 }
 
 process.exit(failures ? 1 : 0);
