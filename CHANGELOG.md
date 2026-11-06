@@ -2,6 +2,24 @@
 
 本项目的所有重要变更都记录在这里。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.0] - 2026-11-06
+
+输入框自适应高度，草稿自动保存。
+
+### 新增
+
+- **草稿自动保存**：还没点「+ 添加到墙上」的文字会在每次按键后同步写入 `localStorage`（键 `dsh-sticky-wall:draft`）。下次打开便签墙（刷新、切面板、换端口、重启）输入框里仍是上次没贴完的那段话，光标位置之外的一切照旧——它仍在输入框里，可以接着写完。点「添加到墙上」后草稿清空（同时删除该键），不会把已贴出的内容再养下一遍。
+
+### 变更
+
+- **输入框自适应高度**：顶部输入区从固定两行改为随内容长高——每次提交后用自身 `scrollHeight` 定高，下限 64px（约两行），上限 `max(180px, min(360px, 40vh))`（窗口变高或变矮都跟着变）。长到上限后不再撑高，改为框内滚动（`overflow-y: auto`）。因为没有依赖数组，面板变窄导致文字折行变多时也会重新量一遍高度。
+- **草稿改动同步落盘**：`updateDraft()` 在 `setState` 的同时写 `localStorage`（不用被动 effect——那会比写入晚一帧，刷新正好卡在那一帧就会丢掉最后一次按键）。
+
+### 文档与测试
+
+- 冒烟测试从八项扩到十项：第 9 项断言「首屏即恢复草稿（`useState` 惰性初始化）」以及每次按键后镜像已写入；第 10 项断言点「添加到墙上」后草稿键被移除。
+- README「特性」补上输入框自适应与草稿保存。
+
 ## [v1.3.0] - 2026-11-05
 
 同排微小高度差自动对齐：便签本身不变高，只在较矮的便签下方留出空白墙面，让下一排从最左侧齐平开始。
@@ -84,6 +102,7 @@
 
 - 渲染冒烟测试：React shim + 假 cordis ctx，在 Node 里直接执行 `client.js`，4 项断言（侧栏图标、空态、卡片列表、编辑态）。
 
+[v1.4.0]: https://github.com/zanhoulll/dsh-sticky-wall/compare/v1.3.0...v1.4.0
 [v1.3.0]: https://github.com/zanhoulll/dsh-sticky-wall/compare/v1.2.0...v1.3.0
 [v1.2.0]: https://github.com/zanhoulll/dsh-sticky-wall/compare/v1.1.0...v1.2.0
 [v1.1.0]: https://github.com/zanhoulll/dsh-sticky-wall/compare/v1.0.0...v1.1.0

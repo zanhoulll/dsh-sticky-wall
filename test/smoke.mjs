@@ -4,8 +4,10 @@
  * Runs the browser half (client.js) in Node with a tiny React shim and a fake
  * cordis ctx, then calls the registered components directly to assert that the
  * sidebar icon, the empty panel, the waterfall wall (with per-span minimum
- * heights), the ratio controls, the copy button and the edit state all render
- * without throwing. No real DOM or browser needed.
+ * heights), the ratio controls, the copy button, the edit state and the
+ * composer's draft (restored from localStorage, re-saved per keystroke, dropped
+ * once the note reaches the wall) all behave without throwing. No real DOM or
+ * browser needed.
  *
  *   node test/smoke.mjs
  */
@@ -289,6 +291,70 @@ try {
 } catch (e) {
   failures++;
   console.log('FAIL copy button:', e.message);
+}
+
+// 9) The composer restores an unposted draft and mirrors every keystroke, so a
+//    refresh (or a panel switch) brings the text back into the box.
+try {
+  const stored = {};
+  const cap = boot([], {
+    localStorage: {
+      getItem: (k) => (k === 'dsh-sticky-wall:draft' ? '还没贴到墙上的草稿' : null),
+      setItem: (k, v) => {
+        stored[k] = v;
+      },
+      removeItem: (k) => {
+        delete stored[k];
+      },
+    },
+  });
+  const nodes = collect(cap.main.comp({}).type({ t: (k) => 'T:' + k }));
+  const ta = nodes.find(
+    (n) => n.type === 'textarea' && String(n.props.className).includes('dsw-sticky-ta'),
+  );
+  if (!ta) throw new Error('no composer textarea');
+  if (ta.props.value !== '还没贴到墙上的草稿') {
+    throw new Error('draft not restored, got ' + JSON.stringify(ta.props.value));
+  }
+  const addBtn = byClass(nodes, 'dsw-sticky-add')[0];
+  if (!addBtn) throw new Error('no add button');
+  if (addBtn.props.disabled) throw new Error('add button disabled for a restored draft');
+  ta.props.onChange({ target: { value: '改成新的草稿' } });
+  if (stored['dsh-sticky-wall:draft'] !== '改成新的草稿') {
+    throw new Error('keystroke not mirrored, stored=' + JSON.stringify(stored));
+  }
+  console.log('PASS draft restore + mirror, value=', JSON.stringify(ta.props.value));
+} catch (e) {
+  failures++;
+  console.log('FAIL draft restore:', e.message);
+}
+
+// 10) Adding the draft to the wall drops it from the box and from the mirror,
+//     so the next open starts empty instead of resurrecting the posted text.
+try {
+  const now = Date.now();
+  const notes = [{ id: 'n_abc', text: '已有便签', color: 0, ratio: 1, createdAt: now, updatedAt: now }];
+  const removed = [];
+  // hook order: notes, draft, color, ratio, query, editingId, editingText, tick
+  const cap = boot([notes, '要贴到墙上的草稿', 2, 1, '', null, '', 0], {
+    localStorage: {
+      getItem: () => '要贴到墙上的草稿',
+      setItem() {},
+      removeItem: (k) => removed.push(k),
+    },
+  });
+  const nodes = collect(cap.main.comp({}).type({ t: (k) => 'T:' + k }));
+  const addBtn = byClass(nodes, 'dsw-sticky-add')[0];
+  if (!addBtn) throw new Error('no add button');
+  if (addBtn.props.disabled) throw new Error('add button disabled with a non-empty draft');
+  addBtn.props.onClick();
+  if (!removed.includes('dsh-sticky-wall:draft')) {
+    throw new Error('draft not cleared after adding, removed=' + JSON.stringify(removed));
+  }
+  console.log('PASS draft cleared after add');
+} catch (e) {
+  failures++;
+  console.log('FAIL draft cleared:', e.message);
 }
 
 process.exit(failures ? 1 : 0);

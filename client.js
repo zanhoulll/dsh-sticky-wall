@@ -23,6 +23,9 @@ window.__ModuleLoader__.load({
     var NS = 'dsh-sticky-wall';
     var API = '/sticky-wall/notes';
     var LS_KEY = 'dsh-sticky-wall:notes';
+    // Whatever sits in the composer without having been added to the wall is
+    // a draft: mirrored here on every keystroke, restored on the next open.
+    var LS_DRAFT = 'dsh-sticky-wall:draft';
     var PANEL_ID = 'sticky-wall';
 
     var FONT =
@@ -125,6 +128,25 @@ window.__ModuleLoader__.load({
       } catch (e) {
         return [];
       }
+    }
+
+    // The composer's unposted text, as left by this browser last time.
+    function readDraft() {
+      try {
+        var raw = window.localStorage.getItem(LS_DRAFT);
+        return typeof raw === 'string' ? raw : '';
+      } catch (e) {
+        return '';
+      }
+    }
+
+    // A blank draft is not a draft: whitespace-only text drops the key instead
+    // of coming back as an apparently empty box.
+    function writeDraft(text) {
+      try {
+        if (text && text.trim()) window.localStorage.setItem(LS_DRAFT, text);
+        else window.localStorage.removeItem(LS_DRAFT);
+      } catch (e) {}
     }
 
     function relTime(ts, t) {
@@ -363,6 +385,14 @@ window.__ModuleLoader__.load({
       wordBreak: 'break-word',
       overflowY: 'hidden',
     };
+    // The composer is auto-sized between these two bounds: never flatter than
+    // its two-row floor, never taller than a share of the viewport (past that
+    // it scrolls inside so the wall below stays reachable).
+    var COMPOSER_MIN_H = 64;
+    function composerMaxH() {
+      var vh = (typeof window !== 'undefined' && window.innerHeight) || 800;
+      return Math.max(180, Math.min(360, Math.round(vh * 0.4)));
+    }
     var EMPTY = { padding: '64px 0', textAlign: 'center' };
 
     function App(props) {
@@ -376,9 +406,18 @@ window.__ModuleLoader__.load({
       var notes = notesState[0];
       var setNotes = notesState[1];
 
-      var draftState = useState('');
+      // Restored eagerly so the box already holds the draft on first paint.
+      var draftState = useState(readDraft);
       var draft = draftState[0];
       var setDraft = draftState[1];
+
+      // Every draft change goes through here: state for the render, plus the
+      // mirror write, so a refresh never eats the last keystroke (a passive
+      // effect would land a frame later than the write).
+      function updateDraft(next) {
+        setDraft(next);
+        writeDraft(next);
+      }
 
       var colorState = useState(0);
       var color = colorState[0];
@@ -501,7 +540,7 @@ window.__ModuleLoader__.load({
         var note = { id: newId(), text: text, color: color, ratio: ratio, createdAt: now, updatedAt: now };
         var next = [note].concat(notes);
         setNotes(next);
-        setDraft('');
+        updateDraft('');
         setColor(0);
         persist(next);
         if (taRef.current) taRef.current.focus();
@@ -843,6 +882,21 @@ window.__ModuleLoader__.load({
             return x + 1;
           });
         }
+      });
+
+      // A textarea never grows with its content, so the composer would hide a
+      // long draft behind a two-row box. Size it from its own scrollHeight on
+      // every commit — a narrower panel wraps into more lines without any React
+      // update — between the two-row floor and a viewport-derived cap, where it
+      // switches to an inner scrollbar.
+      useLayoutEffect(function () {
+        var el = taRef.current;
+        if (!el) return;
+        el.style.height = 'auto';
+        var want = Math.max(0, el.scrollHeight);
+        var cap = composerMaxH();
+        el.style.height = Math.max(COMPOSER_MIN_H, Math.min(want, cap)) + 'px';
+        el.style.overflowY = want > cap ? 'auto' : 'hidden';
       });
 
       // Runs after every commit; it only writes state when the packing actually
@@ -1228,13 +1282,13 @@ window.__ModuleLoader__.load({
           value: draft,
           placeholder: t('placeholder'),
           onChange: function (e) {
-            setDraft(e.target.value);
+            updateDraft(e.target.value);
           },
           onKeyDown: onComposerKeyDown,
           rows: 2,
           style: {
             width: '100%',
-            minHeight: '64px',
+            minHeight: COMPOSER_MIN_H + 'px',
             resize: 'none',
             border: 'none',
             outline: 'none',
