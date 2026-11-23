@@ -38,9 +38,11 @@ function normalizeNote(raw) {
   // How many columns of the wall the note spans: 1 is one cell, 4 fills a row.
   // The browser clamps it again to the column count it actually has.
   const ratio = Number.isInteger(raw.ratio) ? Math.max(1, Math.min(MAX_RATIO, raw.ratio)) : 1;
+  const locked = raw.locked === true ? true : raw.locked === false ? false : null;
+  const order = Number.isFinite(raw.order) ? raw.order : null;
   const createdAt = Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now();
   const updatedAt = Number.isFinite(raw.updatedAt) ? raw.updatedAt : createdAt;
-  return { id, text, color, ratio, createdAt, updatedAt };
+  return { id, text, color, ratio, locked, order, createdAt, updatedAt };
 }
 
 function readNotes() {

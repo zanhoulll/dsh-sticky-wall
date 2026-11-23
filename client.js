@@ -50,6 +50,8 @@ window.__ModuleLoader__.load({
     var RATIOS = [1, 2, 3, 4];
     var GAP = 18;
     var TARGET_COL = 236;
+    var DRAG_HOLD = 400;
+    var DRAG_SLOP = 6;
     // A card's minimum height shrinks with its span (column width / span): 1:1
     // stays square, wider notes get flatter. The shape comes from width and
     // span, not from shrinking the type.
@@ -59,6 +61,51 @@ window.__ModuleLoader__.load({
     function ratioOf(note) {
       var r = Math.round(Number(note && note.ratio));
       return r >= 1 && r <= 4 ? r : 1;
+    }
+
+    function lockedOf(note) {
+      return !!(note && note.locked);
+    }
+
+    function finiteOrder(note) {
+      if (!note || note.order == null) return null;
+      var value = Number(note.order);
+      return Number.isFinite(value) ? value : null;
+    }
+
+    // Manual order is primary once present; notes without one form a stable
+    // legacy tail. Timestamp and id break duplicate-order ties deterministically.
+    function compareNotes(a, b) {
+      var ao = finiteOrder(a);
+      var bo = finiteOrder(b);
+      if (ao != null || bo != null) {
+        if (ao == null) return 1;
+        if (bo == null) return -1;
+        if (ao !== bo) return ao - bo;
+      }
+      var byTime = (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0);
+      if (byTime) return byTime;
+      var aid = String(a.id || '');
+      var bid = String(b.id || '');
+      return aid < bid ? -1 : aid > bid ? 1 : 0;
+    }
+
+    // Pure reordering over the complete list, never just the search results.
+    // The source occupies the target's original index (not "before" or "after"
+    // the target): A→B gives B,A,C and B→C gives A,C,B. Reverse drags use the
+    // same rule. Every note gets a continuous order so hidden notes keep place.
+    function reorderNotes(list, sourceId, targetId) {
+      if (!sourceId || !targetId || sourceId === targetId) return null;
+      var ordered = list.slice().sort(compareNotes);
+      var from = ordered.findIndex(function (n) { return n.id === sourceId; });
+      var to = ordered.findIndex(function (n) { return n.id === targetId; });
+      if (from < 0 || to < 0) return null;
+      var moving = ordered[from];
+      ordered.splice(from, 1);
+      ordered.splice(to, 0, moving);
+      return ordered.map(function (n, index) {
+        return Object.assign({}, n, { order: index });
+      });
     }
 
     var zh = {
@@ -83,7 +130,17 @@ window.__ModuleLoader__.load({
       editHint: '双击编辑 · ⌘/Ctrl + Enter 保存 · Esc 取消',
       ratio: '比例',
       ratioSpan: '占 {n} 格',
-      ratioCycle: '点击切换占位比例',
+      noteMenu: '便签菜单',
+      dragHint: '长按 400ms 拖动排序',
+      color: '切换颜色',
+      lockNote: '锁定便签',
+      unlockNote: '解锁便签',
+      colorSun: '黄色',
+      colorRose: '粉色',
+      colorSky: '蓝色',
+      colorMint: '绿色',
+      colorViolet: '紫色',
+      colorCream: '米色',
     };
 
     var en = {
@@ -108,7 +165,17 @@ window.__ModuleLoader__.load({
       editHint: 'Double-click to edit · ⌘/Ctrl + Enter to save · Esc to cancel',
       ratio: 'Ratio',
       ratioSpan: 'spans {n} columns',
-      ratioCycle: 'Click to cycle how many columns it spans',
+      noteMenu: 'Note menu',
+      dragHint: 'Press and hold for 400ms to reorder',
+      color: 'Change color',
+      lockNote: 'Lock note',
+      unlockNote: 'Unlock note',
+      colorSun: 'Yellow',
+      colorRose: 'Pink',
+      colorSky: 'Blue',
+      colorMint: 'Green',
+      colorViolet: 'Purple',
+      colorCream: 'Cream',
     };
 
     function fallbackText(key) {
@@ -246,6 +313,45 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // Three-dot "more" glyph for the card's bottom action row. The decorative
+    // dots at the card top are the long-press drag handle; this one only
+    // opens the card menu.
+    function moreIcon() {
+      return h(
+        'svg',
+        { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true' },
+        [6, 12, 18].map(function (x) {
+          return h('circle', { key: 'd' + x, cx: x, cy: 12, r: 1.6, fill: 'currentColor' });
+        }),
+      );
+    }
+
+    // A small padlock for the bottom-row lock button. The shackle is open
+    // when unlocked; the button's pressed state is the only lock indicator.
+    function lockIcon(locked, size) {
+      var px = size || 15;
+      return h(
+        'svg',
+        { width: px, height: px, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true' },
+        h('rect', {
+          x: 5,
+          y: 10.5,
+          width: 14,
+          height: 10,
+          rx: 2.4,
+          stroke: 'currentColor',
+          strokeWidth: 1.7,
+        }),
+        h('path', {
+          d: locked ? 'M8 10.5V7a4 4 0 0 1 8 0v3.5' : 'M8 10.5V7a4 4 0 0 1 7.6-1.7',
+          stroke: 'currentColor',
+          strokeWidth: 1.7,
+          strokeLinecap: 'round',
+        }),
+        h('circle', { cx: 12, cy: 15.5, r: 1.25, fill: 'currentColor' }),
+      );
+    }
+
     // Sidebar icon: a little sticky note with a folded corner.
     function SidebarIcon(props) {
       var size = props && typeof props.size === 'number' ? props.size : 18;
@@ -293,6 +399,7 @@ window.__ModuleLoader__.load({
       '.dsw-sticky-card:hover .dsw-sticky-actions,.dsw-sticky-card:focus-within .dsw-sticky-actions{opacity:1}',
       '.dsw-sticky-iconbtn{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;border:none;cursor:pointer;background:rgba(255,255,255,0.55);color:#5A5340;padding:0}',
       '.dsw-sticky-iconbtn:hover{background:rgba(255,255,255,0.92)}',
+      '.dsw-sticky-iconbtn.dsw-sticky-lockbtn[aria-pressed="true"]{background:rgba(61,54,42,0.12);color:#3D362A}',
       '.dsw-sticky-add:hover:not(:disabled){filter:brightness(1.1)}',
       '.dsw-sticky-add:active:not(:disabled){transform:translateY(1px)}',
       '.dsw-sticky-add:disabled{opacity:0.45;cursor:not-allowed}',
@@ -307,6 +414,9 @@ window.__ModuleLoader__.load({
       '.dsw-sticky-ready .dsw-sticky-slot{transition:transform .26s cubic-bezier(.22,.8,.24,1)}',
       '.dsw-sticky-slot:hover{z-index:3}',
       '.dsw-sticky-ratiochip{font-variant-numeric:tabular-nums}',
+      '.dsw-sticky-menu-button,.dsw-sticky-drag-handle{touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}',
+      '.dsw-sticky-slot.dsw-sticky-menu-open{z-index:12}',
+      '.dsw-sticky-slot.dsw-sticky-dragging{z-index:20}',
       '@keyframes dswStickyIn{from{opacity:0}to{opacity:1}}',
     ].join('\n');
 
@@ -459,11 +569,22 @@ window.__ModuleLoader__.load({
       var colW = colState[0];
       var setColW = colState[1];
 
+      // Appended after the original state hooks to keep the lightweight smoke
+      // harness compatible with older seeded hook queues.
+      var menuState = useState(null);
+      var menuId = menuState[0];
+      var setMenuId = menuState[1];
+      var dragViewState = useState(null);
+      var dragView = dragViewState[0];
+      var setDragView = dragViewState[1];
+
       var taRef = useRef(null);
       var editRef = useRef(null);
       var editSize = useRef(null);
       var wallRef = useRef(null);
       var cardRefs = useRef({});
+      var dragRef = useRef(null);
+      var persistRef = useRef({ sending: false, queued: null });
       // Natural card heights cached per note (keyed by width/span/text) so the
       // row-alignment stretch never feeds back into the measurement.
 
@@ -471,20 +592,41 @@ window.__ModuleLoader__.load({
       // wall would flash its unpositioned stack.
       var useLayoutEffect = React.useLayoutEffect || React.useEffect || function () {};
 
-      // The stored note may be older than the ratio feature — or written by a
-      // host process that still predates it, in which case the field is stripped
-      // on every save. The local mirror is written by this browser and does keep
-      // it, so recover a missing ratio from there before falling back to square.
+      // Older hosts can strip newer fields on save. Recover all of them by id
+      // first. If any order is still missing, discard the mixed ordering and
+      // rebuild the whole list with the legacy newest-first rule.
       function hydrate(list) {
         var byId = {};
         readLocal().forEach(function (n) {
           if (n && n.id) byId[n.id] = n;
         });
-        return list.map(function (n) {
+        var entries = list.map(function (n, index) {
           var mine = byId[n.id];
           var r = n.ratio != null ? ratioOf(n) : mine ? ratioOf(mine) : 1;
-          return Object.assign({}, n, { ratio: r });
+          var locked = n.locked != null ? lockedOf(n) : mine ? lockedOf(mine) : false;
+          var order = finiteOrder(n);
+          if (order == null && mine) order = finiteOrder(mine);
+          return {
+            note: Object.assign({}, n, { ratio: r, locked: locked, order: order }),
+            index: index,
+          };
         });
+        if (entries.some(function (entry) { return finiteOrder(entry.note) == null; })) {
+          entries.sort(function (a, b) {
+            var byTime =
+              (b.note.updatedAt || b.note.createdAt || 0) -
+              (a.note.updatedAt || a.note.createdAt || 0);
+            if (byTime) return byTime;
+            var aid = String(a.note.id || '');
+            var bid = String(b.note.id || '');
+            if (aid !== bid) return aid < bid ? -1 : 1;
+            return a.index - b.index;
+          });
+          entries.forEach(function (entry, index) {
+            entry.note.order = index;
+          });
+        }
+        return entries.map(function (entry) { return entry.note; });
       }
 
       // Load once from the host route; fall back to the local mirror.
@@ -510,7 +652,7 @@ window.__ModuleLoader__.load({
           })
           .catch(function () {
             var local = readLocal();
-            if (local.length) setNotes(local);
+            if (local.length) setNotes(hydrate(local));
           });
         var timer = window.setInterval(function () {
           setTick(function (x) {
@@ -522,22 +664,97 @@ window.__ModuleLoader__.load({
         };
       }, []);
 
+      // Menus close on a real outside press or Escape. The root check avoids
+      // closing before a menu item's own click has run.
+      useEffect(function () {
+        if (menuId == null || typeof document === 'undefined' || !document) return undefined;
+        function onOutsidePointerDown(e) {
+          var target = e.target;
+          if (target && typeof target.closest === 'function') {
+            var root = target.closest('[data-sticky-menu-root]');
+            if (root && root.getAttribute('data-sticky-menu-root') === String(menuId)) return;
+          }
+          setMenuId(null);
+        }
+        function onMenuEscape(e) {
+          if (e.key === 'Escape') setMenuId(null);
+        }
+        document.addEventListener('pointerdown', onOutsidePointerDown);
+        document.addEventListener('keydown', onMenuEscape);
+        return function () {
+          document.removeEventListener('pointerdown', onOutsidePointerDown);
+          document.removeEventListener('keydown', onMenuEscape);
+        };
+      }, [menuId]);
+
+      useEffect(function () {
+        return function () {
+          if (dragRef.current) {
+            if (dragRef.current.timer != null) window.clearTimeout(dragRef.current.timer);
+            dragRef.current = null;
+          }
+        };
+      }, []);
+
       function persist(list) {
+        // The local mirror is always synchronous. Host writes are serialized:
+        // while one is in flight, only the newest queued snapshot survives.
         try {
           window.localStorage.setItem(LS_KEY, JSON.stringify(list));
         } catch (e) {}
-        fetch(API, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ notes: list }),
-        }).catch(function () {});
+        var channel = persistRef.current;
+        if (channel.sending) {
+          channel.queued = list;
+          return;
+        }
+        channel.sending = true;
+        function settled() {
+          var next = channel.queued;
+          channel.queued = null;
+          if (next) send(next);
+          else channel.sending = false;
+        }
+        function send(snapshot) {
+          var request;
+          try {
+            // Keep the first fetch synchronous for callers and the smoke shim.
+            request = fetch(API, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ notes: snapshot }),
+            });
+          } catch (e) {
+            settled();
+            return;
+          }
+          Promise.resolve(request).then(settled, settled);
+        }
+        send(list);
+      }
+
+      function frontOrder(list) {
+        var min = Infinity;
+        list.forEach(function (n) {
+          var value = finiteOrder(n);
+          if (value != null && value < min) min = value;
+        });
+        return min === Infinity ? 0 : min - 1;
       }
 
       function addNote() {
         var text = draft.trim();
         if (!text) return;
         var now = Date.now();
-        var note = { id: newId(), text: text, color: color, ratio: ratio, createdAt: now, updatedAt: now };
+        var note = {
+          id: newId(),
+          text: text,
+          color: color,
+          ratio: ratio,
+          locked: false,
+          order: frontOrder(notes),
+          createdAt: now,
+          updatedAt: now,
+        };
         var next = [note].concat(notes);
         setNotes(next);
         updateDraft('');
@@ -547,6 +764,10 @@ window.__ModuleLoader__.load({
       }
 
       function removeNote(id) {
+        var target = notes.find(function (n) {
+          return n.id === id;
+        });
+        if (lockedOf(target)) return;
         var next = notes.filter(function (n) {
           return n.id !== id;
         });
@@ -599,13 +820,26 @@ window.__ModuleLoader__.load({
       }
 
       function beginEdit(note) {
-        setEditingId(note.id);
-        setEditingText(note.text || '');
+        var current = notes.find(function (n) {
+          return n.id === (note && note.id);
+        }) || note;
+        if (!current || lockedOf(current)) return;
+        setEditingId(current.id);
+        setEditingText(current.text || '');
       }
 
       function commitEdit() {
         var id = editingId;
         if (id == null) return;
+        var target = notes.find(function (n) {
+          return n.id === id;
+        });
+        // This guard also covers an edit begun before the note was locked and
+        // the empty-text path, which would otherwise remove the note.
+        if (target && lockedOf(target)) {
+          setEditingId(null);
+          return;
+        }
         var text = editingText.trim();
         if (!text) {
           removeNote(id);
@@ -614,7 +848,7 @@ window.__ModuleLoader__.load({
         var now = Date.now();
         var next = notes.map(function (n) {
           return n.id === id
-            ? { id: n.id, text: text, color: n.color, ratio: ratioOf(n), createdAt: n.createdAt, updatedAt: now }
+            ? Object.assign({}, n, { text: text, updatedAt: now, order: frontOrder(notes) })
             : n;
         });
         setNotes(next);
@@ -626,22 +860,146 @@ window.__ModuleLoader__.load({
         setEditingId(null);
       }
 
-      // Re-shape a note without touching updatedAt: the wall sorts by edit
-      // time, and changing a note's proportions is not an edit of its content.
-      function cycleRatio(id) {
+      function setNoteColor(id, nextColor) {
+        if (!Number.isInteger(nextColor) || nextColor < 0 || nextColor >= PALETTE.length) return;
         var next = notes.map(function (n) {
-          if (n.id !== id) return n;
-          return {
-            id: n.id,
-            text: n.text,
-            color: n.color,
-            ratio: (ratioOf(n) % RATIOS.length) + 1,
-            createdAt: n.createdAt,
-            updatedAt: n.updatedAt,
-          };
+          return n.id === id ? Object.assign({}, n, { color: nextColor }) : n;
         });
         setNotes(next);
         persist(next);
+      }
+
+      function setNoteRatio(id, nextRatio) {
+        if (!Number.isInteger(nextRatio) || nextRatio < 1 || nextRatio > RATIOS.length) return;
+        var next = notes.map(function (n) {
+          return n.id === id ? Object.assign({}, n, { ratio: nextRatio }) : n;
+        });
+        setNotes(next);
+        persist(next);
+      }
+
+      function toggleLock(id) {
+        var target = notes.find(function (n) { return n.id === id; });
+        if (!target) return;
+        var willLock = !lockedOf(target);
+        var next = notes.map(function (n) {
+          return n.id === id ? Object.assign({}, n, { locked: willLock }) : n;
+        });
+        setNotes(next);
+        persist(next);
+        if (willLock && editingId === id) setEditingId(null);
+      }
+
+      function moveNote(sourceId, targetId) {
+        var next = reorderNotes(notes, sourceId, targetId);
+        if (!next) return;
+        setNotes(next);
+        persist(next);
+      }
+
+      function hitNoteId(e) {
+        var hit = null;
+        try {
+          if (
+            typeof document !== 'undefined' &&
+            document &&
+            typeof document.elementFromPoint === 'function' &&
+            Number.isFinite(e.clientX) &&
+            Number.isFinite(e.clientY)
+          ) {
+            hit = document.elementFromPoint(e.clientX, e.clientY);
+          }
+        } catch (err) {}
+        if (!hit) hit = e.target;
+        if (hit && typeof hit.closest === 'function') {
+          var slot = hit.closest('[data-sticky-id]');
+          if (slot) return slot.getAttribute('data-sticky-id');
+        }
+        return null;
+      }
+
+      function releasePointer(session) {
+        try {
+          if (session.target && typeof session.target.releasePointerCapture === 'function') {
+            session.target.releasePointerCapture(session.pointerId);
+          }
+        } catch (err) {}
+      }
+
+      function clearPointer(session) {
+        if (!session) return;
+        if (session.timer != null) window.clearTimeout(session.timer);
+        session.timer = null;
+        if (dragRef.current === session) dragRef.current = null;
+        releasePointer(session);
+        setDragView(null);
+      }
+
+      function onMenuPointerDown(id, e) {
+        if (e.button != null && e.button !== 0) return;
+        if (dragRef.current) clearPointer(dragRef.current);
+        var session = {
+          id: id,
+          pointerId: e.pointerId,
+          target: e.currentTarget,
+          startX: Number(e.clientX) || 0,
+          startY: Number(e.clientY) || 0,
+          overId: id,
+          active: false,
+          timer: null,
+        };
+        dragRef.current = session;
+        try {
+          if (session.target && typeof session.target.setPointerCapture === 'function') {
+            session.target.setPointerCapture(session.pointerId);
+          }
+        } catch (err) {}
+        session.timer = window.setTimeout(function () {
+          if (dragRef.current !== session) return;
+          session.timer = null;
+          session.active = true;
+          setMenuId(null);
+          setDragView({ id: id, overId: id, dx: 0, dy: 0 });
+        }, DRAG_HOLD);
+      }
+
+      function onMenuPointerMove(id, e) {
+        var session = dragRef.current;
+        if (!session || session.id !== id) return;
+        if (session.pointerId != null && e.pointerId != null && session.pointerId !== e.pointerId) return;
+        var dx = (Number(e.clientX) || 0) - session.startX;
+        var dy = (Number(e.clientY) || 0) - session.startY;
+        if (!session.active) {
+          if (dx * dx + dy * dy > DRAG_SLOP * DRAG_SLOP) {
+            clearPointer(session);
+          }
+          return;
+        }
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+        var overId = hitNoteId(e) || session.overId;
+        session.overId = overId;
+        setDragView({ id: id, overId: overId, dx: dx, dy: dy });
+      }
+
+      function onMenuPointerUp(id, e) {
+        var session = dragRef.current;
+        if (!session || session.id !== id) return;
+        if (session.pointerId != null && e.pointerId != null && session.pointerId !== e.pointerId) return;
+        var wasActive = session.active;
+        var overId = wasActive ? hitNoteId(e) || session.overId : null;
+        clearPointer(session);
+        if (wasActive && overId) moveNote(id, overId);
+      }
+
+      function onMenuPointerCancel(id, e) {
+        var session = dragRef.current;
+        if (!session || session.id !== id) return;
+        if (session.pointerId != null && e.pointerId != null && session.pointerId !== e.pointerId) return;
+        clearPointer(session);
+      }
+
+      function onMenuClick(id, e) {
+        setMenuId(menuId === id ? null : id);
       }
 
       function onComposerKeyDown(e) {
@@ -663,9 +1021,7 @@ window.__ModuleLoader__.load({
 
       var filtered = useMemo(
         function () {
-          var list = notes.slice().sort(function (a, b) {
-            return (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0);
-          });
+          var list = notes.slice().sort(compareNotes);
           var q = query.trim().toLowerCase();
           if (!q) return list;
           return list.filter(function (n) {
@@ -1000,9 +1356,111 @@ window.__ModuleLoader__.load({
         );
       }
 
+      function renderMenu(note) {
+        if (menuId !== note.id) return null;
+        var menuTitle = t('noteMenu');
+        return h(
+          'div',
+          {
+            id: 'dsw-sticky-menu-' + note.id,
+            role: 'menu',
+            'aria-label': menuTitle,
+            style: {
+              position: 'absolute',
+              // Anchored to the bottom-right "more" button: open upward so the
+              // popup stays inside the scroll viewport.
+              bottom: 'calc(100% + 8px)',
+              right: '0',
+              zIndex: 30,
+              minWidth: '224px',
+              padding: '10px',
+              borderRadius: '12px',
+              border: '1px solid rgba(74,63,34,0.16)',
+              background: 'rgba(255,255,255,0.98)',
+              boxShadow: '0 14px 34px rgba(24,20,12,0.20)',
+              color: '#3B362B',
+              // One centred column: colours then ratio, both vertically and
+              // horizontally centred inside the popup.
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '10px',
+            },
+          },
+          h(
+            'div',
+            { style: { display: 'flex', justifyContent: 'center', gap: '8px' } },
+            PALETTE.map(function (c, i) {
+              var label = t('color') + ' · ' + t('color' + c.key.charAt(0).toUpperCase() + c.key.slice(1));
+              var active = (note.color | 0) === i;
+              return h('button', {
+                key: 'menu_color_' + i,
+                type: 'button',
+                role: 'menuitemradio',
+                'aria-checked': active,
+                'aria-label': label,
+                title: label,
+                onClick: function () {
+                  setNoteColor(note.id, i);
+                  setMenuId(null);
+                },
+                style: {
+                  width: '24px',
+                  height: '24px',
+                  padding: 0,
+                  borderRadius: '50%',
+                  cursor: 'pointer',
+                  background: c.dot,
+                  border: active ? '2px solid #3D362A' : '2px solid rgba(61,54,42,0.12)',
+                },
+              });
+            }),
+          ),
+          h(
+            'div',
+            { style: { display: 'flex', justifyContent: 'center', gap: '5px' } },
+            RATIOS.map(function (value) {
+              var label = t('ratio') + ' ' + value + ':1 · ' + spanLabel(value);
+              var active = ratioOf(note) === value;
+              return h(
+                'button',
+                {
+                  key: 'menu_ratio_' + value,
+                  type: 'button',
+                  role: 'menuitemradio',
+                  'aria-checked': active,
+                  'aria-label': label,
+                  title: label,
+                  onClick: function () {
+                    setNoteRatio(note.id, value);
+                    setMenuId(null);
+                  },
+                  style: {
+                    height: '27px',
+                    padding: '0 8px',
+                    borderRadius: '7px',
+                    border: '1px solid rgba(61,54,42,0.18)',
+                    background: active ? '#3D362A' : '#F7F3E9',
+                    color: active ? '#FBF3DC' : '#5A5340',
+                    cursor: 'pointer',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                  },
+                },
+                value + ':1',
+              );
+            }),
+          ),
+        );
+      }
+
       function renderCard(note) {
         var c = PALETTE[(note.color | 0) % PALETTE.length] || PALETTE[0];
         var isEditing = editingId === note.id;
+        var isMenuOpen = menuId === note.id;
+        var isDragging = dragView && dragView.id === note.id;
+        var isDropTarget = dragView && dragView.id !== note.id && dragView.overId === note.id;
         var s = String(note.id || '');
         var seed = 0;
         for (var i = 0; i < s.length; i++) seed = (seed + s.charCodeAt(i)) % 1000;
@@ -1015,6 +1473,7 @@ window.__ModuleLoader__.load({
         var r = span;
         var slotW = span * colW + (span - 1) * GAP;
         var cardStyle = {
+          position: 'relative',
           display: 'flex',
           flexDirection: 'column',
           justifyContent: 'space-between',
@@ -1030,7 +1489,27 @@ window.__ModuleLoader__.load({
           background: c.card,
           border: '1px solid ' + c.edge,
           color: '#3B362B',
-          boxShadow: '0 10px 22px rgba(24,20,12,0.10), 0 1px 2px rgba(24,20,12,0.06)',
+          boxShadow: isDragging
+            ? '0 22px 42px rgba(24,20,12,0.28), 0 4px 10px rgba(24,20,12,0.14)'
+            : isDropTarget
+              ? '0 0 0 6px rgba(37,99,235,0.16), 0 10px 22px rgba(24,20,12,0.10), 0 1px 2px rgba(24,20,12,0.06)'
+              : '0 10px 22px rgba(24,20,12,0.10), 0 1px 2px rgba(24,20,12,0.06)',
+          opacity: isDragging ? 0.9 : 1,
+          // Only the article follows the pointer. The slot keeps its measured
+          // waterfall transform, and hit-testing passes through to cards below.
+          // The base .dsw-sticky-card animates transform over .18s; leaving that
+          // on while dragging makes the card trail the pointer. Drop the
+          // transform transition (keep a soft shadow fade) so it tracks 1:1.
+          transition: isDragging ? 'box-shadow .12s ease' : undefined,
+          willChange: isDragging ? 'transform' : undefined,
+          transform: isDragging
+            ? 'translate3d(' + (dragView.dx || 0) + 'px,' + (dragView.dy || 0) + 'px,0) rotate(2deg)'
+            : undefined,
+          pointerEvents: isDragging ? 'none' : undefined,
+          // Solid high-contrast blue reads clearly on every pastel paper and
+          // on the white wall; the soft halo reinforces the drop target.
+          outline: isDropTarget ? '3px dashed #1D4ED8' : 'none',
+          outlineOffset: isDropTarget ? '3px' : 0,
           '--rot': rot + 'deg',
         };
         var textEl = isEditing
@@ -1063,9 +1542,14 @@ window.__ModuleLoader__.load({
           'div',
           {
             key: note.id,
-            className: 'dsw-sticky-slot',
+            className:
+              'dsw-sticky-slot' +
+              (isMenuOpen ? ' dsw-sticky-menu-open' : '') +
+              (isDragging ? ' dsw-sticky-dragging' : ''),
+            'data-sticky-id': note.id,
             style: {
               width: slotW + 'px',
+              zIndex: isDragging ? 20 : isMenuOpen ? 12 : undefined,
               transform:
                 'translate3d(' + (place ? place.x : 0) + 'px,' + (place ? place.y : 0) + 'px,0)',
             },
@@ -1076,39 +1560,76 @@ window.__ModuleLoader__.load({
               key: 'card',
               className: 'dsw-sticky-card',
               'data-ratio': r,
+              'data-locked': lockedOf(note) ? 'true' : 'false',
               style: cardStyle,
               ref: function (el) {
                 if (el) cardRefs.current[note.id] = el;
                 else delete cardRefs.current[note.id];
               },
             },
+            // Three dots centred in the card's 20px top padding. They are the
+            // long-press drag handle: a transparent 26x20 hit area with no
+            // visible button chrome, holding the three identical SVG circles.
+            h(
+              'button',
+              {
+                key: 'drag-handle',
+                type: 'button',
+                className: 'dsw-sticky-drag-handle',
+                'aria-label': t('dragHint'),
+                title: t('dragHint'),
+                onPointerDown: function (e) { onMenuPointerDown(note.id, e); },
+                onPointerMove: function (e) { onMenuPointerMove(note.id, e); },
+                onPointerUp: function (e) { onMenuPointerUp(note.id, e); },
+                onPointerCancel: function (e) { onMenuPointerCancel(note.id, e); },
+                onLostPointerCapture: function (e) { onMenuPointerCancel(note.id, e); },
+                onContextMenu: function (e) { e.preventDefault(); },
+                style: {
+                  position: 'absolute',
+                  top: '10px',
+                  left: '50%',
+                  transform: 'translate(-50%, -50%)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: '26px',
+                  height: '20px',
+                  padding: 0,
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: isDragging ? 'grabbing' : 'grab',
+                },
+              },
+              h(
+                'svg',
+                {
+                  key: 'dots',
+                  'aria-hidden': 'true',
+                  width: 13,
+                  height: 3,
+                  viewBox: '0 0 13 3',
+                  fill: '#5A5340',
+                  style: { pointerEvents: 'none' },
+                },
+                [1.5, 6.5, 11.5].map(function (x) {
+                  return h('circle', { key: 'c' + x, cx: x, cy: 1.5, r: 1.5 });
+                }),
+              ),
+            ),
             textEl,
             h(
               'div',
               { key: 'foot', style: CARD_FOOT },
-              h(
-                'span',
-                { key: 'time', style: CARD_TIME },
-                relTime(note.updatedAt || note.createdAt, t),
-              ),
+              h('span', { key: 'time', style: CARD_TIME }, relTime(note.updatedAt || note.createdAt, t)),
               h(
                 'div',
-                { key: 'actions', className: 'dsw-sticky-actions', style: CARD_ACTIONS },
-                h(
-                  'button',
-                  {
-                    key: 'ratio',
-                    type: 'button',
-                    className: 'dsw-sticky-iconbtn dsw-sticky-ratiochip',
-                    title: t('ratioCycle') + ' · ' + r + ':1 · ' + spanLabel(r),
-                    'aria-label': t('ratio') + ' ' + r + ':1 · ' + spanLabel(r),
-                    style: { width: 'auto', padding: '0 7px', fontSize: '11px', fontWeight: 700 },
-                    onClick: function () {
-                      cycleRatio(note.id);
-                    },
-                  },
-                  r + ':1',
-                ),
+                {
+                  key: 'actions',
+                  className: 'dsw-sticky-actions',
+                  // Keep the row (and the popup anchored to it) visible while
+                  // the menu is open, even after the pointer leaves the card.
+                  style: isMenuOpen ? Object.assign({}, CARD_ACTIONS, { opacity: 1 }) : CARD_ACTIONS,
+                },
                 h(
                   'button',
                   {
@@ -1132,7 +1653,8 @@ window.__ModuleLoader__.load({
                     className: 'dsw-sticky-iconbtn',
                     title: t('editNote'),
                     'aria-label': t('editNote'),
-                    style: {},
+                    disabled: lockedOf(note),
+                    style: lockedOf(note) ? { opacity: 0.4, cursor: 'not-allowed' } : {},
                     onClick: function () {
                       beginEdit(note);
                     },
@@ -1147,12 +1669,53 @@ window.__ModuleLoader__.load({
                     className: 'dsw-sticky-iconbtn',
                     title: t('deleteNote'),
                     'aria-label': t('deleteNote'),
-                    style: {},
+                    disabled: lockedOf(note),
+                    style: lockedOf(note) ? { opacity: 0.4, cursor: 'not-allowed' } : {},
                     onClick: function () {
                       removeNote(note.id);
                     },
                   },
                   trashIcon(),
+                ),
+                h(
+                  'button',
+                  {
+                    key: 'lock',
+                    type: 'button',
+                    className: 'dsw-sticky-iconbtn dsw-sticky-lockbtn',
+                    title: lockedOf(note) ? t('unlockNote') : t('lockNote'),
+                    'aria-label': lockedOf(note) ? t('unlockNote') : t('lockNote'),
+                    'aria-pressed': lockedOf(note),
+                    onClick: function () {
+                      toggleLock(note.id);
+                      setMenuId(null);
+                    },
+                  },
+                  lockIcon(lockedOf(note)),
+                ),
+                h(
+                  'div',
+                  {
+                    key: 'menu-anchor',
+                    'data-sticky-menu-root': note.id,
+                    style: { position: 'relative', display: 'inline-flex' },
+                  },
+                  h(
+                    'button',
+                    {
+                      key: 'more',
+                      type: 'button',
+                      className: 'dsw-sticky-iconbtn dsw-sticky-menu-button',
+                      title: t('noteMenu'),
+                      'aria-label': t('noteMenu'),
+                      'aria-haspopup': 'menu',
+                      'aria-expanded': isMenuOpen,
+                      'aria-controls': 'dsw-sticky-menu-' + note.id,
+                      onClick: function (e) { onMenuClick(note.id, e); },
+                    },
+                    moreIcon(),
+                  ),
+                  renderMenu(note),
                 ),
               ),
             ),
